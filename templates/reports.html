@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Sales & Profit Report</h1>
+<table>
+  <tr><th>Invoice</th><th>Date</th><th>Payment</th><th>Total</th><th>Gross Profit</th><th>Receipt</th></tr>
+  {% for s,p in rows %}
+  <tr>
+    <td>{{s.invoice}}</td>
+    <td>{{s.created_at}}</td>
+    <td>{{s.payment_type}}</td>
+    <td>₱{{"%.2f"|format(s.total)}}</td>
+    <td>₱{{"%.2f"|format(p)}}</td>
+    <td>
+      <a href="{{ url_for('receipt', sale_id=s.id, width=80) }}"><button type="button">VIEW / REPRINT</button></a>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
