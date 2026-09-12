@@ -1,229 +1,2029 @@
-
 import os
-from datetime import datetime, timezone
+from datetime import datetime, date
 from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, session, flash, abort
+
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    session,
+    flash,
+    render_template_string
+)
+
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, func
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, joinedload
+
+
+# ============================================================
+# APP CONFIGURATION
+# ============================================================
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "CHANGE-ME-BEFORE-PUBLIC-DEPLOYMENT")
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("COOKIE_SECURE", "0") == "1"
 
-db_url = os.environ.get("DATABASE_URL", "sqlite:///workers.db")
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-engine = create_engine(db_url, connect_args={"check_same_thread": False} if db_url.startswith("sqlite") else {})
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+app.secret_key = os.environ.get(
+    "SECRET_KEY",
+    "change-this-secret-key-in-production"
+)
 
-class User(Base):
-    __tablename__="users"
-    id=Column(Integer,primary_key=True)
-    name=Column(String(150),nullable=False)
-    username=Column(String(80),unique=True,nullable=False,index=True)
-    password_hash=Column(String(255),nullable=False)
-    role=Column(String(20),nullable=False,default="worker")
-    active=Column(Integer,nullable=False,default=1)
 
-class Job(Base):
-    __tablename__="jobs"
-    id=Column(Integer,primary_key=True)
-    title=Column(String(200),nullable=False)
-    description=Column(Text,nullable=False)
-    priority=Column(String(20),nullable=False,default="Normal")
-    due_date=Column(String(30),nullable=True)
-    created_at=Column(DateTime,nullable=False)
-    created_by=Column(Integer,ForeignKey("users.id"),nullable=False)
-    assignments=relationship("Assignment",back_populates="job",cascade="all, delete-orphan")
+# ============================================================
+# DATABASE CONFIGURATION
+# ============================================================
 
-class Assignment(Base):
-    __tablename__="assignments"
-    id=Column(Integer,primary_key=True)
-    job_id=Column(Integer,ForeignKey("jobs.id"),nullable=False)
-    worker_id=Column(Integer,ForeignKey("users.id"),nullable=False)
-    acknowledged_at=Column(DateTime,nullable=True)
-    status=Column(String(20),nullable=False,default="Pending")
-    comment=Column(Text,nullable=True)
-    updated_at=Column(DateTime,nullable=True)
-    __table_args__=(UniqueConstraint("job_id","worker_id",name="uq_job_worker"),)
-    job=relationship("Job",back_populates="assignments")
-    worker=relationship("User")
+database_url = os.environ.get("DATABASE_URL")
 
-Base.metadata.create_all(engine)
+if database_url:
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace(
+            "postgres://",
+            "postgresql://",
+            1
+        )
+else:
+    database_url = "sqlite:///hure_management.db"
 
-def now():
-    return datetime.now(timezone.utc)
 
-def seed():
-    db=SessionLocal()
-    if not db.query(User).filter_by(role="admin").first():
-        db.add(User(name="Administrator",username="admin",password_hash=generate_password_hash("admin123"),role="admin"))
-    if not db.query(User).filter_by(username="worker1").first():
-        db.add(User(name="Sample Worker",username="worker1",password_hash=generate_password_hash("1234"),role="worker"))
-    db.commit(); db.close()
-seed()
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 
-def current_user():
-    uid=session.get("user_id")
-    if not uid:return None
-    db=SessionLocal(); u=db.get(User,uid); db.close()
-    return u
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-def required(role=None):
-    def deco(fn):
-        @wraps(fn)
-        def wrapper(*args,**kwargs):
-            u=current_user()
-            if not u or not u.active:
-                session.clear(); return redirect(url_for("login"))
-            if role and u.role!=role: abort(403)
-            return fn(*args,**kwargs)
-        return wrapper
-    return deco
 
-@app.context_processor
-def inject_user():
-    return {"me": current_user()}
+db = SQLAlchemy(app)
 
-@app.route("/",methods=["GET"])
+
+# ============================================================
+# DATABASE MODELS
+# ============================================================
+
+class User(db.Model):
+
+    __tablename__ = "hure_users"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    name = db.Column(
+        db.String(150),
+        nullable=False
+    )
+
+    username = db.Column(
+        db.String(100),
+        unique=True,
+        nullable=False
+    )
+
+    password = db.Column(
+        db.String(255),
+        nullable=False
+    )
+
+    role = db.Column(
+        db.String(50),
+        nullable=False,
+        default="worker"
+    )
+
+    active = db.Column(
+        db.Boolean,
+        default=True
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    assignments = db.relationship(
+        "Assignment",
+        backref="worker",
+        lazy=True
+    )
+
+
+class Job(db.Model):
+
+    __tablename__ = "hure_jobs"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    title = db.Column(
+        db.String(200),
+        nullable=False
+    )
+
+    description = db.Column(
+        db.Text
+    )
+
+    location = db.Column(
+        db.String(200)
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    assignments = db.relationship(
+        "Assignment",
+        backref="job",
+        lazy=True,
+        cascade="all, delete-orphan"
+    )
+
+
+class Assignment(db.Model):
+
+    __tablename__ = "hure_assignments"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    job_id = db.Column(
+        db.Integer,
+        db.ForeignKey("hure_jobs.id"),
+        nullable=False
+    )
+
+    worker_id = db.Column(
+        db.Integer,
+        db.ForeignKey("hure_users.id"),
+        nullable=False
+    )
+
+    status = db.Column(
+        db.String(50),
+        default="Pending"
+    )
+
+    assigned_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+
+# ============================================================
+# LOGIN REQUIRED
+# ============================================================
+
+def login_required(f):
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+
+        if "user_id" not in session:
+
+            flash(
+                "Please login first.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("login")
+            )
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+# ============================================================
+# ADMIN REQUIRED
+# ============================================================
+
+def admin_required(f):
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+
+        if "user_id" not in session:
+
+            return redirect(
+                url_for("login")
+            )
+
+        if session.get("role") != "admin":
+
+            flash(
+                "Admin access required.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("dashboard")
+            )
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+# ============================================================
+# BASE HTML TEMPLATE
+# ============================================================
+
+BASE_HTML = """
+
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1"
+>
+
+<title>
+{{ title }}
+</title>
+
+
+<style>
+
+* {
+
+box-sizing:border-box;
+
+}
+
+body {
+
+margin:0;
+
+font-family:Arial, sans-serif;
+
+background:#f4f6f9;
+
+color:#333;
+
+}
+
+
+.navbar {
+
+background:#1f2937;
+
+color:white;
+
+padding:15px 30px;
+
+display:flex;
+
+justify-content:space-between;
+
+align-items:center;
+
+}
+
+
+.navbar h2 {
+
+margin:0;
+
+font-size:20px;
+
+}
+
+
+.navbar a {
+
+color:white;
+
+text-decoration:none;
+
+margin-left:15px;
+
+padding:8px 12px;
+
+border-radius:5px;
+
+}
+
+
+.navbar a:hover {
+
+background:#374151;
+
+}
+
+
+.container {
+
+max-width:1200px;
+
+margin:auto;
+
+padding:30px;
+
+}
+
+
+.card {
+
+background:white;
+
+padding:20px;
+
+border-radius:10px;
+
+margin-bottom:20px;
+
+box-shadow:0 2px 8px rgba(0,0,0,.08);
+
+}
+
+
+.stats {
+
+display:grid;
+
+grid-template-columns:
+repeat(auto-fit,minmax(180px,1fr));
+
+gap:15px;
+
+margin-bottom:25px;
+
+}
+
+
+.stat {
+
+background:white;
+
+padding:20px;
+
+border-radius:10px;
+
+box-shadow:0 2px 8px rgba(0,0,0,.08);
+
+}
+
+
+.stat h3 {
+
+margin:0;
+
+font-size:14px;
+
+color:#666;
+
+}
+
+
+.stat p {
+
+font-size:28px;
+
+margin:10px 0 0;
+
+font-weight:bold;
+
+}
+
+
+input,
+
+textarea,
+
+select {
+
+width:100%;
+
+padding:10px;
+
+margin-top:6px;
+
+margin-bottom:15px;
+
+border:1px solid #ddd;
+
+border-radius:6px;
+
+}
+
+
+button {
+
+background:#2563eb;
+
+color:white;
+
+border:none;
+
+padding:10px 18px;
+
+border-radius:6px;
+
+cursor:pointer;
+
+}
+
+
+button:hover {
+
+background:#1d4ed8;
+
+}
+
+
+table {
+
+width:100%;
+
+border-collapse:collapse;
+
+margin-top:15px;
+
+}
+
+
+th,
+
+td {
+
+padding:12px;
+
+border-bottom:1px solid #ddd;
+
+text-align:left;
+
+}
+
+
+th {
+
+background:#f3f4f6;
+
+}
+
+
+.badge {
+
+padding:5px 10px;
+
+border-radius:20px;
+
+font-size:12px;
+
+color:white;
+
+}
+
+
+.pending {
+
+background:#f59e0b;
+
+}
+
+
+.progress {
+
+background:#3b82f6;
+
+}
+
+
+.done {
+
+background:#10b981;
+
+}
+
+
+.notdone {
+
+background:#ef4444;
+
+}
+
+
+.flash {
+
+padding:12px;
+
+margin-bottom:15px;
+
+border-radius:6px;
+
+}
+
+
+.success {
+
+background:#d1fae5;
+
+color:#065f46;
+
+}
+
+
+.danger {
+
+background:#fee2e2;
+
+color:#991b1b;
+
+}
+
+
+.login-box {
+
+max-width:400px;
+
+margin:100px auto;
+
+background:white;
+
+padding:30px;
+
+border-radius:10px;
+
+box-shadow:0 4px 15px rgba(0,0,0,.1);
+
+}
+
+
+.row {
+
+display:grid;
+
+grid-template-columns:
+repeat(auto-fit,minmax(250px,1fr));
+
+gap:20px;
+
+}
+
+
+.small {
+
+font-size:13px;
+
+color:#666;
+
+}
+
+
+@media(max-width:600px) {
+
+.container {
+
+padding:15px;
+
+}
+
+table {
+
+font-size:12px;
+
+}
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+{% if session.get("user_id") %}
+
+<div class="navbar">
+
+<h2>
+INTEGRATED HURE MANAGEMENT SYSTEM
+</h2>
+
+<div>
+
+<a href="{{ url_for('dashboard') }}">
+Dashboard
+</a>
+
+{% if session.get("role") == "admin" %}
+
+<a href="{{ url_for('workers') }}">
+Workers
+</a>
+
+<a href="{{ url_for('jobs') }}">
+Jobs
+</a>
+
+{% endif %}
+
+<a href="{{ url_for('logout') }}">
+Logout
+</a>
+
+</div>
+
+</div>
+
+{% endif %}
+
+
+<div class="container">
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+
+{% for category,message in messages %}
+
+<div class="flash {{ category }}">
+
+{{ message }}
+
+</div>
+
+{% endfor %}
+
+{% endwith %}
+
+
+{{ content|safe }}
+
+</div>
+
+
+</body>
+
+</html>
+
+"""
+
+
+# ============================================================
+# RENDER PAGE
+# ============================================================
+
+def render_page(title, content):
+
+    return render_template_string(
+        BASE_HTML,
+        title=title,
+        content=content
+    )
+
+
+# ============================================================
+# CREATE DEFAULT ADMIN
+# ============================================================
+
+def create_default_admin():
+
+    admin = User.query.filter_by(
+        username="admin"
+    ).first()
+
+    if not admin:
+
+        admin_password = os.environ.get(
+            "ADMIN_PASSWORD",
+            "admin123"
+        )
+
+        admin = User(
+
+            name="System Administrator",
+
+            username="admin",
+
+            password=generate_password_hash(
+                admin_password
+            ),
+
+            role="admin",
+
+            active=True
+
+        )
+
+        db.session.add(admin)
+
+        db.session.commit()
+
+
+# ============================================================
+# HOME
+# ============================================================
+
+@app.route("/")
+
 def home():
-    return redirect(url_for("dashboard") if session.get("user_id") else url_for("login"))
 
-@app.route("/login",methods=["GET","POST"])
+    if "user_id" in session:
+
+        return redirect(
+            url_for("dashboard")
+        )
+
+    return redirect(
+        url_for("login")
+    )
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.route(
+    "/login",
+    methods=["GET", "POST"]
+)
+
 def login():
-    if request.method=="POST":
-        db=SessionLocal()
-        u=db.query(User).filter(func.lower(User.username)==request.form["username"].strip().lower()).first()
-        ok=u and u.active and check_password_hash(u.password_hash,request.form["password"])
-        db.close()
-        if ok:
-            session.clear(); session["user_id"]=u.id
-            return redirect(url_for("dashboard"))
-        flash("Invalid username or password.")
-    return render_template("login.html")
+
+    if request.method == "POST":
+
+        username = request.form.get(
+            "username",
+            ""
+        ).strip()
+
+        password = request.form.get(
+            "password",
+            ""
+        )
+
+        user = User.query.filter_by(
+            username=username
+        ).first()
+
+
+        if not user:
+
+            flash(
+                "Invalid username or password.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("login")
+            )
+
+
+        if not user.active:
+
+            flash(
+                "This account is inactive.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("login")
+            )
+
+
+        if not check_password_hash(
+            user.password,
+            password
+        ):
+
+            flash(
+                "Invalid username or password.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("login")
+            )
+
+
+        session["user_id"] = user.id
+
+        session["name"] = user.name
+
+        session["role"] = user.role
+
+
+        return redirect(
+            url_for("dashboard")
+        )
+
+
+    content = """
+
+    <div class="login-box">
+
+    <h2>
+    HURE MANAGEMENT SYSTEM
+    </h2>
+
+    <p class="small">
+    Login to continue
+    </p>
+
+
+    <form method="POST">
+
+
+    <label>
+    Username
+    </label>
+
+    <input
+    type="text"
+    name="username"
+    required
+    >
+
+
+    <label>
+    Password
+    </label>
+
+    <input
+    type="password"
+    name="password"
+    required
+    >
+
+
+    <button type="submit">
+
+    Login
+
+    </button>
+
+
+    </form>
+
+
+    </div>
+
+    """
+
+    return render_page(
+        "Login",
+        content
+    )
+
+
+# ============================================================
+# LOGOUT
+# ============================================================
 
 @app.route("/logout")
+
 def logout():
-    session.clear(); return redirect(url_for("login"))
+
+    session.clear()
+
+    return redirect(
+        url_for("login")
+    )
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
 
 @app.route("/dashboard")
-@required()
+
+@login_required
+
 def dashboard():
-    db=SessionLocal(); u=db.get(User,session["user_id"])
-    if u.role=="admin":
-        jobs=db.query(Job).options(joinedload(Job.assignments).joinedload(Assignment.worker)).order_by(Job.id.desc()).all()
-        workers=db.query(User).filter_by(role="worker",active=1).order_by(User.name).all()
-        stats={
-          "jobs":len(jobs),
-          "done":sum(1 for j in jobs for a in j.assignments if a.status=="Done"),
-          "notdone":sum(1 for j in jobs for a in j.assignments if a.status=="Not Done"),
-          "pending":sum(1 for j in jobs for a in j.assignments if a.status=="Pending"),
-        }
-        db.close()
 
-today_total = 0
+    user_id = session["user_id"]
 
-return render_template(
-    "admin.html",
-    jobs=jobs,
-    workers=workers,
-    stats=stats,
-    today_total=today_total
+    user = db.session.get(
+        User,
+        user_id
+    )
+
+
+    # ========================================================
+    # ADMIN DASHBOARD
+    # ========================================================
+
+    if user.role == "admin":
+
+        jobs = Job.query.order_by(
+            Job.id.desc()
+        ).all()
+
+
+        workers = User.query.filter_by(
+            role="worker",
+            active=True
+        ).order_by(
+            User.name
+        ).all()
+
+
+        assignments = Assignment.query.all()
+
+
+        total_jobs = len(jobs)
+
+
+        done = sum(
+            1
+            for assignment in assignments
+            if assignment.status == "Done"
+        )
+
+
+        notdone = sum(
+            1
+            for assignment in assignments
+            if assignment.status == "Not Done"
+        )
+
+
+        pending = sum(
+            1
+            for assignment in assignments
+            if assignment.status == "Pending"
+        )
+
+
+        in_progress = sum(
+            1
+            for assignment in assignments
+            if assignment.status == "In Progress"
+        )
+
+
+        today_total = sum(
+
+            1
+
+            for job in jobs
+
+            if job.created_at
+            and job.created_at.date() == date.today()
+
+        )
+
+
+        content = """
+
+        <h1>
+        Welcome, {{ name }}
+        </h1>
+
+
+        <div class="stats">
+
+
+        <div class="stat">
+
+        <h3>
+        Total Jobs
+        </h3>
+
+        <p>
+        {{ total_jobs }}
+        </p>
+
+        </div>
+
+
+        <div class="stat">
+
+        <h3>
+        Today's Jobs
+        </h3>
+
+        <p>
+        {{ today_total }}
+        </p>
+
+        </div>
+
+
+        <div class="stat">
+
+        <h3>
+        Workers
+        </h3>
+
+        <p>
+        {{ total_workers }}
+        </p>
+
+        </div>
+
+
+        <div class="stat">
+
+        <h3>
+        Done
+        </h3>
+
+        <p>
+        {{ done }}
+        </p>
+
+        </div>
+
+
+        <div class="stat">
+
+        <h3>
+        Pending
+        </h3>
+
+        <p>
+        {{ pending }}
+        </p>
+
+        </div>
+
+
+        </div>
+
+
+        <div class="card">
+
+        <h2>
+        Recent Jobs
+        </h2>
+
+
+        <table>
+
+        <tr>
+
+        <th>
+        ID
+        </th>
+
+        <th>
+        Job
+        </th>
+
+        <th>
+        Location
+        </th>
+
+        <th>
+        Created
+        </th>
+
+        </tr>
+
+
+        {% for job in jobs[:10] %}
+
+        <tr>
+
+        <td>
+        {{ job.id }}
+        </td>
+
+        <td>
+        {{ job.title }}
+        </td>
+
+        <td>
+        {{ job.location or "-" }}
+        </td>
+
+        <td>
+        {{ job.created_at.strftime("%Y-%m-%d") }}
+        </td>
+
+        </tr>
+
+        {% endfor %}
+
+
+        </table>
+
+
+        </div>
+
+        """
+
+
+        rendered_content = render_template_string(
+
+            content,
+
+            name=user.name,
+
+            jobs=jobs,
+
+            total_jobs=total_jobs,
+
+            today_total=today_total,
+
+            total_workers=len(workers),
+
+            done=done,
+
+            pending=pending,
+
+            notdone=notdone,
+
+            in_progress=in_progress
+
+        )
+
+
+        return render_page(
+            "Admin Dashboard",
+            rendered_content
+        )
+
+
+    # ========================================================
+    # WORKER DASHBOARD
+    # ========================================================
+
+    assignments = Assignment.query.filter_by(
+        worker_id=user.id
+    ).order_by(
+        Assignment.id.desc()
+    ).all()
+
+
+    content = """
+
+    <h1>
+    Welcome, {{ name }}
+    </h1>
+
+
+    <div class="card">
+
+    <h2>
+    My Assigned Jobs
+    </h2>
+
+
+    <table>
+
+
+    <tr>
+
+    <th>
+    Job
+    </th>
+
+    <th>
+    Description
+    </th>
+
+    <th>
+    Location
+    </th>
+
+    <th>
+    Status
+    </th>
+
+    <th>
+    Update
+    </th>
+
+    </tr>
+
+
+    {% for assignment in assignments %}
+
+
+    <tr>
+
+
+    <td>
+
+    {{ assignment.job.title }}
+
+    </td>
+
+
+    <td>
+
+    {{ assignment.job.description or "-" }}
+
+    </td>
+
+
+    <td>
+
+    {{ assignment.job.location or "-" }}
+
+    </td>
+
+
+    <td>
+
+    <span class="badge">
+
+    {{ assignment.status }}
+
+    </span>
+
+    </td>
+
+
+    <td>
+
+
+    <form
+    method="POST"
+    action="{{ url_for('update_assignment', assignment_id=assignment.id) }}"
+    >
+
+
+    <select name="status">
+
+    <option
+    value="Pending"
+    >
+
+    Pending
+
+    </option>
+
+
+    <option
+    value="In Progress"
+    >
+
+    In Progress
+
+    </option>
+
+
+    <option
+    value="Done"
+    >
+
+    Done
+
+    </option>
+
+
+    <option
+    value="Not Done"
+    >
+
+    Not Done
+
+    </option>
+
+
+    </select>
+
+
+    <button type="submit">
+
+    Update
+
+    </button>
+
+
+    </form>
+
+
+    </td>
+
+
+    </tr>
+
+
+    {% endfor %}
+
+
+    </table>
+
+
+    </div>
+
+
+    """
+
+
+    rendered_content = render_template_string(
+
+        content,
+
+        name=user.name,
+
+        assignments=assignments
+
+    )
+
+
+    return render_page(
+        "Worker Dashboard",
+        rendered_content
+    )
+
+
+# ============================================================
+# WORKERS
+# ============================================================
+
+@app.route(
+    "/workers",
+    methods=["GET", "POST"]
 )
-    jobs=db.query(Assignment).options(joinedload(Assignment.job)).filter_by(worker_id=u.id).join(Job).order_by(Job.id.desc()).all()
-    db.close(); return render_template("worker.html",jobs=jobs)
 
-@app.route("/admin/jobs/create",methods=["POST"])
-@required("admin")
-def create_job():
-    title=request.form.get("title","").strip()
-    desc=request.form.get("description","").strip()
-    priority=request.form.get("priority","Normal")
-    due=request.form.get("due_date","").strip()
-    ids=[int(x) for x in request.form.getlist("workers") if x.isdigit()]
-    if not title or not desc or not ids:
-        flash("Enter the job details and select at least one worker."); return redirect(url_for("dashboard"))
-    db=SessionLocal()
-    job=Job(title=title,description=desc,priority=priority if priority in ("Low","Normal","High","Urgent") else "Normal",due_date=due or None,created_at=now(),created_by=session["user_id"])
-    db.add(job); db.flush()
-    valid=db.query(User).filter(User.id.in_(ids),User.role=="worker",User.active==1).all()
-    for w in valid: db.add(Assignment(job_id=job.id,worker_id=w.id))
-    db.commit(); db.close(); flash("Job delivered to the selected workers."); return redirect(url_for("dashboard"))
+@admin_required
 
-@app.route("/worker/job/<int:aid>",methods=["POST"])
-@required("worker")
-def worker_update(aid):
-    db=SessionLocal(); a=db.query(Assignment).filter_by(id=aid,worker_id=session["user_id"]).first()
-    if not a: db.close(); abort(404)
-    status=request.form.get("status","Pending")
-    if status not in ("Pending","Done","Not Done"): status="Pending"
-    comment=request.form.get("comment","").strip()
-    t=now()
-    if not a.acknowledged_at: a.acknowledged_at=t
-    a.status=status; a.comment=comment; a.updated_at=t
-    db.commit(); db.close(); flash("Your acknowledgment and job status were saved."); return redirect(url_for("dashboard"))
+def workers():
 
-@app.route("/admin/job/<int:jid>")
-@required("admin")
-def job_detail(jid):
-    db=SessionLocal(); job=db.query(Job).options(joinedload(Job.assignments).joinedload(Assignment.worker)).get(jid)
-    if not job: db.close(); abort(404)
-    db.close(); return render_template("job_detail.html",job=job)
+    if request.method == "POST":
 
-@app.route("/admin/job/<int:jid>/archive",methods=["POST"])
-@required("admin")
-def archive(jid):
-    db=SessionLocal(); job=db.get(Job,jid)
-    if not job: db.close(); abort(404)
-    if not job.assignments or not all(a.status=="Done" for a in job.assignments):
-        db.close(); flash("Only jobs where every assigned worker is Done can be cleared."); return redirect(url_for("dashboard"))
-    db.delete(job); db.commit(); db.close(); flash("Job cleared/archived."); return redirect(url_for("dashboard"))
+        name = request.form.get(
+            "name",
+            ""
+        ).strip()
 
-@app.route("/admin/workers/create",methods=["POST"])
-@required("admin")
-def create_worker():
-    name=request.form.get("name","").strip(); username=request.form.get("username","").strip(); pw=request.form.get("password","")
-    if not name or not username or not pw: flash("Complete all worker account fields."); return redirect(url_for("dashboard"))
-    db=SessionLocal()
-    if db.query(User).filter(func.lower(User.username)==username.lower()).first():
-        db.close(); flash("Username already exists."); return redirect(url_for("dashboard"))
-    db.add(User(name=name,username=username,password_hash=generate_password_hash(pw),role="worker")); db.commit(); db.close()
-    flash("Worker account created."); return redirect(url_for("dashboard"))
 
-@app.route("/admin/worker/<int:wid>/password",methods=["POST"])
-@required("admin")
-def reset_password(wid):
-    pw=request.form.get("password","")
-    if len(pw)<4: flash("Password must be at least 4 characters."); return redirect(url_for("dashboard"))
-    db=SessionLocal(); u=db.get(User,wid)
-    if u and u.role=="worker": u.password_hash=generate_password_hash(pw); db.commit(); flash("Worker password reset.")
-    db.close(); return redirect(url_for("dashboard"))
+        username = request.form.get(
+            "username",
+            ""
+        ).strip()
 
-@app.route("/admin/worker/<int:wid>/disable",methods=["POST"])
-@required("admin")
-def disable(wid):
-    db=SessionLocal(); u=db.get(User,wid)
-    if u and u.role=="worker": u.active=0; db.commit()
-    db.close(); return redirect(url_for("dashboard"))
 
-@app.route("/admin/worker/<int:wid>/enable",methods=["POST"])
-@required("admin")
-def enable(wid):
-    db=SessionLocal(); u=db.get(User,wid)
-    if u and u.role=="worker": u.active=1; db.commit()
-    db.close(); return redirect(url_for("dashboard"))
+        password = request.form.get(
+            "password",
+            ""
+        )
 
-@app.route("/admin/change-password",methods=["POST"])
-@required("admin")
-def change_admin_password():
-    pw=request.form.get("password","")
-    if len(pw)<8: flash("Admin password must be at least 8 characters."); return redirect(url_for("dashboard"))
-    db=SessionLocal(); u=db.get(User,session["user_id"]); u.password_hash=generate_password_hash(pw); db.commit(); db.close()
-    flash("Admin password changed."); return redirect(url_for("dashboard"))
 
-if __name__=="__main__":
-    app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)),debug=False)
+        existing_user = User.query.filter_by(
+            username=username
+        ).first()
+
+
+        if existing_user:
+
+            flash(
+                "Username already exists.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("workers")
+            )
+
+
+        worker = User(
+
+            name=name,
+
+            username=username,
+
+            password=generate_password_hash(
+                password
+            ),
+
+            role="worker",
+
+            active=True
+
+        )
+
+
+        db.session.add(worker)
+
+        db.session.commit()
+
+
+        flash(
+            "Worker created successfully.",
+            "success"
+        )
+
+
+        return redirect(
+            url_for("workers")
+        )
+
+
+    worker_list = User.query.filter_by(
+        role="worker"
+    ).order_by(
+        User.name
+    ).all()
+
+
+    content = """
+
+    <div class="row">
+
+
+    <div class="card">
+
+
+    <h2>
+    Add Worker
+    </h2>
+
+
+    <form method="POST">
+
+
+    <label>
+    Full Name
+    </label>
+
+    <input
+    name="name"
+    required
+    >
+
+
+    <label>
+    Username
+    </label>
+
+    <input
+    name="username"
+    required
+    >
+
+
+    <label>
+    Password
+    </label>
+
+    <input
+    type="password"
+    name="password"
+    required
+    >
+
+
+    <button type="submit">
+
+    Create Worker
+
+    </button>
+
+
+    </form>
+
+
+    </div>
+
+
+    <div class="card">
+
+
+    <h2>
+    Workers
+    </h2>
+
+
+    <table>
+
+
+    <tr>
+
+    <th>
+    Name
+    </th>
+
+    <th>
+    Username
+    </th>
+
+    <th>
+    Status
+    </th>
+
+    </tr>
+
+
+    {% for worker in workers %}
+
+
+    <tr>
+
+    <td>
+    {{ worker.name }}
+    </td>
+
+    <td>
+    {{ worker.username }}
+    </td>
+
+    <td>
+
+    {% if worker.active %}
+
+    Active
+
+    {% else %}
+
+    Inactive
+
+    {% endif %}
+
+    </td>
+
+    </tr>
+
+
+    {% endfor %}
+
+
+    </table>
+
+
+    </div>
+
+
+    </div>
+
+
+    """
+
+
+    rendered_content = render_template_string(
+
+        content,
+
+        workers=worker_list
+
+    )
+
+
+    return render_page(
+        "Workers",
+        rendered_content
+    )
+
+
+# ============================================================
+# JOBS
+# ============================================================
+
+@app.route(
+    "/jobs",
+    methods=["GET", "POST"]
+)
+
+@admin_required
+
+def jobs():
+
+    if request.method == "POST":
+
+        title = request.form.get(
+            "title",
+            ""
+        ).strip()
+
+
+        description = request.form.get(
+            "description",
+            ""
+        ).strip()
+
+
+        location = request.form.get(
+            "location",
+            ""
+        ).strip()
+
+
+        job = Job(
+
+            title=title,
+
+            description=description,
+
+            location=location
+
+        )
+
+
+        db.session.add(job)
+
+        db.session.commit()
+
+
+        flash(
+            "Job created successfully.",
+            "success"
+        )
+
+
+        return redirect(
+            url_for("jobs")
+        )
+
+
+    job_list = Job.query.order_by(
+        Job.id.desc()
+    ).all()
+
+
+    workers = User.query.filter_by(
+        role="worker",
+        active=True
+    ).all()
+
+
+    content = """
+
+    <div class="row">
+
+
+    <div class="card">
+
+
+    <h2>
+    Create Job
+    </h2>
+
+
+    <form method="POST">
+
+
+    <label>
+    Job Title
+    </label>
+
+    <input
+    name="title"
+    required
+    >
+
+
+    <label>
+    Description
+    </label>
+
+    <textarea
+    name="description"
+    >
+    </textarea>
+
+
+    <label>
+    Location
+    </label>
+
+    <input
+    name="location"
+    >
+
+
+    <button type="submit">
+
+    Create Job
+
+    </button>
+
+
+    </form>
+
+
+    </div>
+
+
+    <div class="card">
+
+
+    <h2>
+    Jobs
+    </h2>
+
+
+    <table>
+
+
+    <tr>
+
+    <th>
+    Job
+    </th>
+
+    <th>
+    Location
+    </th>
+
+    <th>
+    Assign Worker
+    </th>
+
+    </tr>
+
+
+    {% for job in jobs %}
+
+
+    <tr>
+
+
+    <td>
+
+    {{ job.title }}
+
+    </td>
+
+
+    <td>
+
+    {{ job.location or "-" }}
+
+    </td>
+
+
+    <td>
+
+
+    <form
+    method="POST"
+    action="{{ url_for('assign_worker', job_id=job.id) }}"
+    >
+
+
+    <select
+    name="worker_id"
+    required
+    >
+
+
+    <option value="">
+
+    Select Worker
+
+    </option>
+
+
+    {% for worker in workers %}
+
+
+    <option
+    value="{{ worker.id }}"
+    >
+
+    {{ worker.name }}
+
+    </option>
+
+
+    {% endfor %}
+
+
+    </select>
+
+
+    <button type="submit">
+
+    Assign
+
+    </button>
+
+
+    </form>
+
+
+    </td>
+
+
+    </tr>
+
+
+    {% endfor %}
+
+
+    </table>
+
+
+    </div>
+
+
+    </div>
+
+
+    """
+
+
+    rendered_content = render_template_string(
+
+        content,
+
+        jobs=job_list,
+
+        workers=workers
+
+    )
+
+
+    return render_page(
+        "Jobs",
+        rendered_content
+    )
+
+
+# ============================================================
+# ASSIGN WORKER
+# ============================================================
+
+@app.route(
+    "/jobs/<int:job_id>/assign",
+    methods=["POST"]
+)
+
+@admin_required
+
+def assign_worker(job_id):
+
+    worker_id = request.form.get(
+        "worker_id"
+    )
+
+
+    existing = Assignment.query.filter_by(
+
+        job_id=job_id,
+
+        worker_id=worker_id
+
+    ).first()
+
+
+    if existing:
+
+        flash(
+            "Worker already assigned to this job.",
+            "danger"
+        )
+
+        return redirect(
+            url_for("jobs")
+        )
+
+
+    assignment = Assignment(
+
+        job_id=job_id,
+
+        worker_id=worker_id,
+
+        status="Pending"
+
+    )
+
+
+    db.session.add(assignment)
+
+    db.session.commit()
+
+
+    flash(
+        "Worker assigned successfully.",
+        "success"
+    )
+
+
+    return redirect(
+        url_for("jobs")
+    )
+
+
+# ============================================================
+# UPDATE ASSIGNMENT
+# ============================================================
+
+@app.route(
+    "/assignment/<int:assignment_id>/update",
+    methods=["POST"]
+)
+
+@login_required
+
+def update_assignment(assignment_id):
+
+    assignment = db.session.get(
+        Assignment,
+        assignment_id
+    )
+
+
+    if not assignment:
+
+        flash(
+            "Assignment not found.",
+            "danger"
+        )
+
+        return redirect(
+            url_for("dashboard")
+        )
+
+
+    # Worker can only update own assignment
+
+    if session["role"] == "worker":
+
+        if assignment.worker_id != session["user_id"]:
+
+            flash(
+                "Access denied.",
+                "danger"
+            )
+
+            return redirect(
+                url_for("dashboard")
+            )
+
+
+    status = request.form.get(
+        "status"
+    )
+
+
+    allowed_statuses = [
+
+        "Pending",
+
+        "In Progress",
+
+        "Done",
+
+        "Not Done"
+
+    ]
+
+
+    if status in allowed_statuses:
+
+        assignment.status = status
+
+        assignment.updated_at = datetime.utcnow()
+
+        db.session.commit()
+
+
+        flash(
+            "Status updated successfully.",
+            "success"
+        )
+
+
+    return redirect(
+        url_for("dashboard")
+    )
+
+
+# ============================================================
+# INITIALIZE DATABASE
+# ============================================================
+
+with app.app_context():
+
+    db.create_all()
+
+    create_default_admin()
+
+
+# ============================================================
+# RUN APPLICATION
+# ============================================================
+
+if __name__ == "__main__":
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            8080
+        )
+    )
+
+
+    app.run(
+
+        host="0.0.0.0",
+
+        port=port,
+
+        debug=False
+
+    )
