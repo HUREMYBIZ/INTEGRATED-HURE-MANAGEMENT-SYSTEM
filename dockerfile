@@ -1,1 +1,11 @@
-web: python -m pip install -r requirements.txt && python app.py
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+CMD ["sh", "-c", "exec python app.py"]
