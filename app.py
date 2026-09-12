@@ -1576,7 +1576,70 @@ def workers():
         rendered_content
     )
 
+# ============================================================
+# DELETE WORKER
+# ============================================================
 
+@app.route(
+    "/workers/<int:worker_id>/delete",
+    methods=["POST"]
+)
+
+@admin_required
+def delete_worker(worker_id):
+
+    worker = db.session.get(
+        User,
+        worker_id
+    )
+
+    if not worker:
+
+        flash(
+            "Worker not found.",
+            "danger"
+        )
+
+        return redirect(
+            url_for("workers")
+        )
+
+
+    if worker.role != "worker":
+
+        flash(
+            "Only worker accounts can be deleted.",
+            "danger"
+        )
+
+        return redirect(
+            url_for("workers")
+        )
+
+
+    # Delete worker assignments first
+
+    Assignment.query.filter_by(
+        worker_id=worker.id
+    ).delete()
+
+
+    # Delete worker
+
+    db.session.delete(worker)
+
+    db.session.commit()
+
+
+    flash(
+        "Worker deleted successfully.",
+        "success"
+    )
+
+
+    return redirect(
+        url_for("workers")
+    )
 # ============================================================
 # JOBS
 # ============================================================
