@@ -123,7 +123,17 @@ def dashboard():
           "notdone":sum(1 for j in jobs for a in j.assignments if a.status=="Not Done"),
           "pending":sum(1 for j in jobs for a in j.assignments if a.status=="Pending"),
         }
-        db.close(); return render_template("admin.html",jobs=jobs,workers=workers,stats=stats)
+        db.close()
+
+today_total = 0
+
+return render_template(
+    "admin.html",
+    jobs=jobs,
+    workers=workers,
+    stats=stats,
+    today_total=today_total
+)
     jobs=db.query(Assignment).options(joinedload(Assignment.job)).filter_by(worker_id=u.id).join(Job).order_by(Job.id.desc()).all()
     db.close(); return render_template("worker.html",jobs=jobs)
 
